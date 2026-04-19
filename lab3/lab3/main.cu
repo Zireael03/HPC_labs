@@ -10,10 +10,8 @@
 using namespace std;
 using namespace cv;
 
-// Константы алгоритма
 const float ALPHA = 0.04f;
 
-// Гауссовы веса в constant memory
 __constant__ float d_GAUSS_WEIGHTS[9];
 
 const float h_GAUSS_WEIGHTS[9] = {
@@ -22,13 +20,11 @@ const float h_GAUSS_WEIGHTS[9] = {
     0.0751f, 0.1238f, 0.0751f
 };
 
-// ---------------------- CUDA KERNELS ----------------------
 __global__ void computeHarrisResponseKernel(float* d_R, int width, int height, float alpha, float threshold, cudaTextureObject_t texObj) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
 
-    // Чтение окна 3x3 через текстуру с hardware clamping
     float I[3][3];
     for (int i = -1; i <= 1; ++i) {
         for (int j = -1; j <= 1; ++j) {
@@ -79,7 +75,6 @@ __global__ void nonMaxSuppressionKernel(const float* d_R, int* d_corners, int wi
     d_corners[y * width + x] = isMax ? 1 : 0;
 }
 
-// ---------------------- CPU РЕАЛИЗАЦИЯ ----------------------
 void computeHarrisCPU(const Mat& img, float threshold, Mat& outCorners) {
     int h = img.rows, w = img.cols;
     outCorners = Mat::zeros(h, w, CV_8UC1);
@@ -114,7 +109,6 @@ void computeHarrisCPU(const Mat& img, float threshold, Mat& outCorners) {
         }
     }
 
-    // NMS
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             if (R[y * w + x] <= threshold) continue;
@@ -132,7 +126,6 @@ void computeHarrisCPU(const Mat& img, float threshold, Mat& outCorners) {
     }
 }
 
-// ---------------------- НАСТРОЙКА ТЕКСТУРЫ ----------------------
 cudaError_t setupTexture(const float* d_data, int width, int height, cudaTextureObject_t* pTexObject) {
     cudaResourceDesc resDesc;
     memset(&resDesc, 0, sizeof(resDesc));
@@ -145,7 +138,7 @@ cudaError_t setupTexture(const float* d_data, int width, int height, cudaTexture
 
     cudaTextureDesc texDesc;
     memset(&texDesc, 0, sizeof(texDesc));
-    texDesc.addressMode[0] = cudaAddressModeClamp;  // Hardware clamping (требование PDF!)
+    texDesc.addressMode[0] = cudaAddressModeClamp; 
     texDesc.addressMode[1] = cudaAddressModeClamp;
     texDesc.filterMode = cudaFilterModePoint;
     texDesc.readMode = cudaReadModeElementType;
@@ -160,7 +153,6 @@ void destroyTexture(cudaTextureObject_t texObject) {
     }
 }
 
-// ---------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------------------
 void drawCorners(Mat& img, const Mat& corners) {
     for (int y = 0; y < img.rows; ++y) {
         for (int x = 0; x < img.cols; ++x) {
@@ -175,7 +167,6 @@ int countCorners(const Mat& corners) {
     return countNonZero(corners);
 }
 
-// ---------------------- MAIN ----------------------
 int main(int argc, char** argv) {
     if (argc < 3) {
         cout << "Usage: " << argv[0] << " <input_image_path> <threshold>\n";
@@ -193,17 +184,14 @@ int main(int argc, char** argv) {
     Mat srcFloat;
     src.convertTo(srcFloat, CV_32FC1);
 
-    // Копируем веса в constant memory
     cudaMemcpyToSymbol(d_GAUSS_WEIGHTS, h_GAUSS_WEIGHTS, 9 * sizeof(float));
 
-    // --- CPU ВЕРСИЯ ---
     Mat cpuCorners;
     auto cpuStart = chrono::high_resolution_clock::now();
     computeHarrisCPU(srcFloat, threshold, cpuCorners);
     auto cpuEnd = chrono::high_resolution_clock::now();
     double cpuTime = chrono::duration_cast<chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-    // --- GPU ВЕРСИЯ ---
     float* d_image = nullptr;
     float* d_R = nullptr;
     int* d_corners = nullptr;
@@ -215,7 +203,6 @@ int main(int argc, char** argv) {
 
     cudaMemcpy(d_image, srcFloat.ptr<float>(), w * h * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Создаем объект текстуры (ТРЕБОВАНИЕ PDF 4.3)
     cudaError_t err = setupTexture(d_image, w, h, &texObj);
     if (err != cudaSuccess) {
         cerr << "Error creating texture object: " << cudaGetErrorString(err) << endl;
@@ -226,7 +213,6 @@ int main(int argc, char** argv) {
     dim3 grid((w + block.x - 1) / block.x, (h + block.y - 1) / block.y);
 
     auto gpuStart = chrono::high_resolution_clock::now();
-    // Передаем texObj как параметр kernel
     computeHarrisResponseKernel << <grid, block >> > (d_R, w, h, ALPHA, threshold, texObj);
     cudaDeviceSynchronize();
     nonMaxSuppressionKernel << <grid, block >> > (d_R, d_corners, w, h, threshold);
@@ -241,7 +227,6 @@ int main(int argc, char** argv) {
         for (int x = 0; x < w; ++x)
             gpuCorners.at<uchar>(y, x) = h_corners[y * w + x] ? 255 : 0;
 
-    // --- СРАВНЕНИЕ ---
     int cpuCount = countCorners(cpuCorners);
     int gpuCount = countCorners(gpuCorners);
     int matching = 0;
@@ -256,7 +241,6 @@ int main(int argc, char** argv) {
     cout << "Pixel match: " << matchPercent << "%\n";
     cout << "Result: " << (matchPercent > 99.0 ? "COINCIDENCE" : "MISMATCH") << "\n\n";
 
-    // --- СОХРАНЕНИЕ ---
     Mat outCPU, outGPU;
     cvtColor(src, outCPU, COLOR_GRAY2BGR);
     cvtColor(src, outGPU, COLOR_GRAY2BGR);
@@ -267,7 +251,6 @@ int main(int argc, char** argv) {
     imwrite("output_gpu.png", outGPU);
     cout << "Images saved: output_cpu.png, output_gpu.png\n";
 
-    // Очистка
     destroyTexture(texObj);
     cudaFree(d_image);
     cudaFree(d_R);
